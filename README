@@ -1,1 +1,91 @@
-End to End machine learning project
+# System Architecture
+
+## High-Level Architecture
+
+```mermaid
+graph TD
+    %% Definitions
+    Client[("👤 Client<br>(Web/Mobile/Postman)")]
+    
+    subgraph "AWS Cloud (us-east-1)"
+        APIG[("Gateway<br>API Gateway (HTTP API)")]
+        
+        subgraph "Compute Layer"
+            Lambda[("λ AWS Lambda<br>(Docker Container)")]
+            ECR[("📦 ECR<br>(Docker Registry)")]
+        end
+        
+        subgraph "Storage Layer"
+            S3[("🪣 S3 Bucket<br>(Model Artifacts)")]
+            DDB[("DynamoDB<br>(Predictions Table)")]
+        end
+        
+        subgraph "Observability"
+            CW[("CloudWatch<br>(Logs & Metrics)")]
+        end
+    end
+
+    %% Connections
+    Client -- "HTTPS POST /moderate" --> APIG
+    APIG -- "Proxy Request" --> Lambda
+    
+    Lambda -- "1. Pull Image (Cold Start)" -.-> ECR
+    Lambda -- "2. Download Model (Cold Start)" --> S3
+    Lambda -- "3. Log Prediction" --> DDB
+    Lambda -- "4. Stream Logs" --> CW
+    
+    %% Styling
+    classDef aws fill:#FF9900,stroke:#232F3E,stroke-width:2px,color:white;
+    classDef storage fill:#3F8624,stroke:#232F3E,stroke-width:2px,color:white;
+    classDef compute fill:#D05C17,stroke:#232F3E,stroke-width:2px,color:white;
+    
+    class Lambda,ECR compute;
+    class S3,DDB storage;
+    class APIG,CW aws;
+```
+
+## Request Flow (Sequence)
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant G as API Gateway
+    participant L as Lambda (FastAPI)
+    participant S as S3 (Models)
+    participant D as DynamoDB
+    
+    C->>G: POST /moderate {"text": "..."}
+    G->>L: Invoke Function
+    
+    rect rgb(240, 248, 255)
+        note right of L: Cold Start (If needed)
+        L-->>S: Check if model exists in /tmp
+        opt Model Missing
+            L->>S: Download best_model.pt
+            S-->>L: Stream File
+        end
+        L->>L: Load DistilBERT into Memory
+    end
+    
+    L->>L: Preprocess Text (Clean/Tokenize)
+    L->>L: Run Inference (PyTorch)
+    
+    par Async Logging
+        L->>D: PutItem (Prediction Result)
+    and Response
+        L-->>G: 200 OK {"is_toxic": true, ...}
+    end
+    
+    G-->>C: JSON Response
+```
+
+## Component Details
+
+| Component | Technology | Purpose |
+|-----------|------------|---------|
+| **API Gateway** | HTTP API (v2) | Provides the public HTTPS endpoint and routes traffic to Lambda. Cheaper and faster than REST API. |
+| **Compute** | AWS Lambda | Runs the Python FastAPI application. Configured with **Docker** to handle large dependencies (PyTorch). |
+| **Container** | Amazon ECR | Stores the Docker image used by Lambda. |
+| **Model Storage** | Amazon S3 | Stores the fine-tuned `distilbert` model weights (`best_model.pt`). Lambda downloads this to `/tmp` on startup. |
+| **Database** | DynamoDB | Stores prediction logs for auditing and analytics. Uses On-Demand capacity. |
+| **Observability** | CloudWatch | Captures structured JSON logs from the application for debugging and monitoring. |
